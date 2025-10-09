@@ -224,7 +224,7 @@ def main():
     print(df.head())
     print('Columnas detectadas para coordenadas: ' + str(col_x) + ' y ' + str(col_y))
 
-    distancia = 35.0
+    distancia = 45.0
     punto_inicial = None  # Cambia a una tupla (x, y) si deseas forzar un punto inicial
 
     puntos = generar_reticulo_hexagonal(vertices, distancia, punto_inicial=punto_inicial)

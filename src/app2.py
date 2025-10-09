@@ -12,7 +12,7 @@ from docx.shared import Cm
 # Configuración
 archivo_excel = 'poligono.xlsx'
 hoja_excel = 0
-separacion_m = 35.0
+separacion_m = 45.0
 incluir_borde = True
 optimizar_desplazamiento = True
 
