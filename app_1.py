@@ -85,5 +85,5 @@ def generar_distribucion_puntos(kmz_filename, distancia_metros):
 
 # --- EJECUTAR ---
 archivo = 'Poligono de prueba.kmz'
-DISTANCIA = 35  # <--- CAMBIA ESTE VALOR (en metros)
+DISTANCIA = 30  # <--- CAMBIA ESTE VALOR (en metros)
 total = generar_distribucion_puntos(archivo, DISTANCIA)
