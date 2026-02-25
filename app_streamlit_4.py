@@ -114,7 +114,7 @@ def procesar_poligono(coords_geo, dist, marg, mapa_fondo, opacidad, metodo, off_
 
     poligono_util = poligono_base.buffer(-marg) if marg > 0 else poligono_base
     if poligono_util.is_empty: 
-        return None, None, "El margen de seguridad es excesivo, anula la parcela.", 0, 0
+        return None, None, "El margen de seguridad es tan grande que elimina por completo la superficie de la parcela.", 0, 0
 
     cx, cy = np.mean(poly_m[:, 0]), np.mean(poly_m[:, 1])
     R = math.hypot((max_lon - min_lon)*m_deg_lon, (max_lat - min_lat)*m_deg_lat)
@@ -157,8 +157,33 @@ def procesar_poligono(coords_geo, dist, marg, mapa_fondo, opacidad, metodo, off_
             mejores_puntos_finales = puntos_validos
             mejor_angulo = angulo
 
+    # --- PROTOCOLO DE RESCATE (3 PUNTOS) ---
     if len(mejores_puntos_finales) == 0:
-        return None, None, "Con esta configuración y ajuste no entra ningún punto.", area_m2, mejor_angulo
+        centro = poligono_util.representative_point()
+        puntos_emergencia = [[centro.x, centro.y]] # Punto 1: Centroide
+        
+        coords_ext = list(poligono_util.exterior.coords)
+        distancias = [(math.hypot(px - centro.x, py - centro.y), px, py) for px, py in coords_ext]
+        distancias.sort(reverse=True, key=lambda x: x[0]) # Ordenar por lejanía
+        
+        if len(distancias) > 0:
+            p1_x, p1_y = distancias[0][1], distancias[0][2]
+            puntos_emergencia.append([(centro.x + p1_x)/2, (centro.y + p1_y)/2]) # Punto 2: Mitad al borde más lejano
+            
+            # Buscar el segundo punto lejano que esté al lado opuesto (ángulo > 90º)
+            if len(distancias) > 1:
+                p2_x, p2_y = distancias[1][1], distancias[1][2] # Valor por defecto
+                v1_x, v1_y = p1_x - centro.x, p1_y - centro.y
+                for d, px, py in distancias[1:]:
+                    vx, vy = px - centro.x, py - centro.y
+                    # Si el producto escalar es negativo, están en lados opuestos
+                    if (v1_x * vx + v1_y * vy) < 0:
+                        p2_x, p2_y = px, py
+                        break
+                puntos_emergencia.append([(centro.x + p2_x)/2, (centro.y + p2_y)/2]) # Punto 3: Mitad al borde opuesto
+                
+        mejores_puntos_finales = np.array(puntos_emergencia)
+        metodo = "RESCATE (3 Puntos)" # Forzamos el nombre del método para la leyenda
 
     p_lon_final = (mejores_puntos_finales[:, 0] / m_deg_lon) + min_lon
     p_lat_final = (mejores_puntos_finales[:, 1] / m_deg_lat) + min_lat
@@ -169,6 +194,7 @@ def procesar_poligono(coords_geo, dist, marg, mapa_fondo, opacidad, metodo, off_
         data_pts.append({'ID': len(data_pts)+1, 'Latitud': la, 'Longitud': lo, 'UTM_X': round(e, 3), 'UTM_Y': round(n, 3), 'Huso': f"{zn}{zl}"})
     df_puntos_final = pd.DataFrame(data_pts)
     
+    # --- GRÁFICO (CON SOLUCIÓN DE CORTES) ---
     fig, ax = plt.subplots(figsize=(5, 3.8))
     utm_poly = np.array([[utm.from_latlon(la, lo)[0], utm.from_latlon(la, lo)[1]] for lo, la in coords_geo])
     
@@ -176,34 +202,42 @@ def procesar_poligono(coords_geo, dist, marg, mapa_fondo, opacidad, metodo, off_
     ax.fill(utm_poly[:,0], utm_poly[:,1], alpha=opacidad, color='cyan')
     ax.scatter(df_puntos_final['UTM_X'], df_puntos_final['UTM_Y'], c='red', s=12, edgecolor='black', lw=0.4, zorder=5)
     
-    titulo_mapa = f"Replanteo: {dist}m | Ajuste: X={off_x:+.2f}m, Y={off_y:+.2f}m"
-    if "OPTIMIZADO" in metodo:
-        titulo_mapa += f"\n(Optimizado: Rotado {mejor_angulo}º)"
+    if "RESCATE" in metodo:
+        titulo_mapa = "⚠️ Parcela pequeña: Modo Rescate (3 Puntos)"
+    else:
+        titulo_mapa = f"Replanteo: {dist}m | Ajuste: X={off_x:+.2f}m, Y={off_y:+.2f}m"
+        if "OPTIMIZADO" in metodo:
+            titulo_mapa += f"\n(Optimizado: Rotado {mejor_angulo}º)"
     
     ax.set_title(titulo_mapa, pad=10, fontsize=9)
+    ax.set_aspect('equal')
     
-    # FORZAR PROPORCIONES PERFECTAS
-    ax.axis('equal')
-    
-    # --- LA SOLUCIÓN AL CORTE DEL MAPA ---
-    # Expandimos un 15% los límites manualmente para que Contextily descargue la periferia
+    # Truco para que Contextily descargue imagen de sobra y no haya recortes blancos
     xmin, xmax = ax.get_xlim()
     ymin, ymax = ax.get_ylim()
-    margin_x = (xmax - xmin) * 0.15
-    margin_y = (ymax - ymin) * 0.15
-    ax.set_xlim(xmin - margin_x, xmax + margin_x)
-    ax.set_ylim(ymin - margin_y, ymax + margin_y)
+    w = xmax - xmin
+    h = ymax - ymin
+    
+    if mapa_fondo != "Ninguno":
+        # Alejamos la cámara virtualmente
+        ax.set_xlim(xmin - (w * 0.5), xmax + (w * 0.5))
+        ax.set_ylim(ymin - (h * 0.5), ymax + (h * 0.5))
+        
+        epsg_code = 32600 + h_n
+        fuente = "https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}" if mapa_fondo == "Satélite PNOA" else "https://www.ign.es/wmts/mapa-raster?request=getTile&layer=MTN&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileCol={x}&TileRow={y}&format=image/jpeg"
+        try: 
+            # Descargamos mapa extra-grande
+            ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False)
+        except: pass
+        
+    # Volvemos a ajustar el encuadre final a la medida perfecta
+    ax.set_xlim(xmin - (w * 0.15), xmax + (w * 0.15))
+    ax.set_ylim(ymin - (h * 0.15), ymax + (h * 0.15))
     
     ax.tick_params(axis='both', which='major', labelsize=7)
     ax.ticklabel_format(useOffset=False, style='plain')
-    
-    if mapa_fondo != "Ninguno":
-        epsg_code = 32600 + h_n
-        fuente = "https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}" if mapa_fondo == "Satélite PNOA" else "https://www.ign.es/wmts/mapa-raster?request=getTile&layer=MTN&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileCol={x}&TileRow={y}&format=image/jpeg"
-        try: ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0)
-        except: pass
         
-    return df_puntos_final, fig, None, area_m2, mejor_angulo
+    return df_puntos_final, fig, None, area_m2, mejor_angulo, ("RESCATE" in metodo)
 
 # ==========================================
 # --- INTERFAZ (TABS SEPARADAS) ---
@@ -212,14 +246,13 @@ def procesar_poligono(coords_geo, dist, marg, mapa_fondo, opacidad, metodo, off_
 tab1, tab2 = st.tabs(["🗺️ 1. DIBUJO Y LOCALIZACIÓN", "⚙️ 2. CONFIGURACIÓN Y RESULTADOS"])
 
 # ------------------------------------------
-# PESTAÑA 1: MAPA EXTREMO SIN CORTES (MAX ZOOM)
+# PESTAÑA 1: MAPA CON ZOOM INFINITO
 # ------------------------------------------
 with tab1:
     col_ctrl, col_map = st.columns([1, 4])
     
     with col_map:
         if st.session_state['rebuild_map'] or st.session_state['map_obj'] is None:
-            # Añadimos max_zoom=24 para permitir acercarse a ver cada árbol
             m = folium.Map(location=st.session_state['map_center_internal'], zoom_start=st.session_state['map_zoom_internal'], max_zoom=24)
             
             url_pnoa = "https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}"
@@ -227,14 +260,12 @@ with tab1:
             
             capa_seleccionada = st.session_state['old_capa']
             
-            # --- LA SOLUCIÓN AL FONDO AMARILLO (ZOOM DIGITAL) ---
-            # El PNOA llega al nivel 19, el MTN al 18. Al fijar max_native_zoom, Leaflet estira la imagen al acercarse más.
+            # --- SOLUCIÓN AL ZOOM GRIS/AMARILLO ---
             zoom_nativo_maximo = 19 if capa_seleccionada == "Satélite PNOA" else 18
-            
             folium.TileLayer(
                 tiles=(url_pnoa if capa_seleccionada == "Satélite PNOA" else url_mtn), 
                 attr="IGN",
-                max_native_zoom=zoom_nativo_maximo,
+                max_native_zoom=zoom_nativo_maximo, # Obliga a escalar digitalmente la imagen al acercarse más
                 max_zoom=24
             ).add_to(m)
 
@@ -343,9 +374,9 @@ with tab2:
             opacidad_final = st.slider("Opacidad Parcela:", 0.0, 1.0, 0.3)
 
         with col_res:
-            texto_carga = 'Calculando rotación óptima y desplazamientos...' if 'OPTIMIZADO' in metodo_dist else 'Aplicando ajuste manual...'
+            texto_carga = 'Calculando rotación óptima...' if 'OPTIMIZADO' in metodo_dist else 'Procesando Malla...'
             with st.spinner(texto_carga):
-                df_res, fig_final, error, area_m2, angulo_opt = procesar_poligono(
+                df_res, fig_final, error, area_m2, angulo_opt, is_rescate = procesar_poligono(
                     st.session_state['poligono_usuario'], distancia, margen, 
                     mapa_final, opacidad_final, metodo_dist, st.session_state['off_x'], st.session_state['off_y']
                 )
@@ -353,8 +384,11 @@ with tab2:
             if error:
                 st.error(error)
             else:
+                if is_rescate:
+                    st.warning("⚠️ El área de la parcela es muy pequeña para la distancia requerida. Se han generado automáticamente 3 puntos de control.")
+                
                 m1, m2, m3 = st.columns(3)
-                if "OPTIMIZADO" in metodo_dist:
+                if "OPTIMIZADO" in metodo_dist and not is_rescate:
                     m1.metric("Puntos", f"{len(df_res)} pts", delta=f"Rotado {angulo_opt}º", delta_color="normal")
                 else:
                     m1.metric("Puntos", f"{len(df_res)} pts")
