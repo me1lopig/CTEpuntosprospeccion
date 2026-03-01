@@ -15,8 +15,8 @@ import folium
 from folium.plugins import Draw
 from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Suite Topográfica PRO", layout="wide")
-st.title("📍 Suite Topográfica: Replanteo y Optimización")
+st.set_page_config(page_title="Distribución de trabajos de Campo", layout="wide")
+st.title("📍 Distribución de trabajos de campo")
 
 # ==========================================
 # --- FUNCIONES DE MEMORIA Y ESTADO ---
@@ -91,7 +91,7 @@ def generar_informe_word(area_ha, area_m2, num_puntos, pts_ha, dist, marg, metod
 
     doc.add_heading('2. Configuración de Malla:', level=1)
     doc.add_paragraph(f"• Método: {metodo}")
-    doc.add_paragraph(f"• Separación: {dist:.2f} m | Margen al linde: {marg:.2f} m")
+    doc.add_paragraph(f"• Separación: {dist:.2f} m | Distancia al borde {marg:.2f} m")
     if "OPTIMIZADO" in metodo:
         doc.add_paragraph(f"• Ángulo de rotación óptimo calculado: {angulo_opt}º")
     doc.add_paragraph(f"• Desplazamiento manual de ajuste: X={off_x:+.2f}m, Y={off_y:+.2f}m")
@@ -113,7 +113,7 @@ def generar_dxf(df_poligono, df_puntos):
     doc.header['$PDSIZE'] = 1.0 
     
     # Crear estructura de capas profesionales
-    doc.layers.add(name="01_PARCELA_LINDE", color=3) # Verde
+    doc.layers.add(name="01_PARCELA_BORDE", color=3) # Verde
     doc.layers.add(name="02_PUNTOS_REPLANTEO", color=1) # Rojo
     doc.layers.add(name="03_ETIQUETAS_ID", color=2) # Amarillo
     
@@ -250,11 +250,11 @@ def procesar_poligono(coords_geo, dist, marg, mapa_fondo, opacidad, metodo, off_
     ax.scatter(df_puntos_final['UTM_X'], df_puntos_final['UTM_Y'], c='red', s=12, edgecolor='black', lw=0.4, zorder=5)
     
     if "RESCATE" in metodo:
-        titulo_mapa = "⚠️ Parcela pequeña: Modo Rescate (3 Puntos)"
+        titulo_mapa = "⚠️ Parcela pequeña:  (3 Puntos)"
     else:
-        titulo_mapa = f"Replanteo: {dist}m | Ajuste: X={off_x:+.2f}m, Y={off_y:+.2f}m"
-        if "OPTIMIZADO" in metodo:
-            titulo_mapa += f"\n(Optimizado: Rotado {mejor_angulo}º)"
+        titulo_mapa = f"Distancia entre puntos: {dist}m "
+        #if "OPTIMIZADO" in metodo:
+        #    titulo_mapa += f"\n(Optimizado: Rotado {mejor_angulo}º)"
     
     ax.set_title(titulo_mapa, pad=10, fontsize=9)
     ax.set_aspect('equal')
@@ -406,7 +406,7 @@ with tab2:
             margen = st.number_input("🛡️ Margen (m):", min_value=0.0, value=1.0, step=0.5, on_change=limpiar_descargas)
             
             st.divider()
-            st.header("🎮 Ajuste Fino")
+            st.header("💎 Ajuste Fino")
             paso = st.selectbox("Resolución del botón:", [1.0, 0.5, 0.1, 0.01], format_func=lambda x: f"{x} m", help="Movimiento de malla por clic.")
             
             st.markdown("<div style='text-align: center; margin-bottom: 5px; font-size: 0.9em;'>Desplazamiento manual: <br><b>X: {:.2f}m | Y: {:.2f}m</b></div>".format(st.session_state['off_x'], st.session_state['off_y']), unsafe_allow_html=True)
@@ -445,13 +445,13 @@ with tab2:
                     m1.metric("Puntos", f"{len(df_res)} pts", delta=f"Rotado {angulo_opt}º", delta_color="normal")
                 else:
                     m1.metric("Puntos", f"{len(df_res)} pts")
-                m2.metric("Área Útil", f"{area_m2/10000:.2f} ha")
+                m2.metric("Área Útil", f"{area_m2:.2f} m2")
                 m3.metric("Densidad", f"{len(df_res)/(area_m2/10000):.0f} pts/ha")
                 
                 st.pyplot(fig_final, use_container_width=False)
                 
                 if not st.session_state.get('archivos_listos'):
-                    if st.button("🚀 PREPARAR INFORMES (Excel, Word y DXF)", type="primary"):
+                    if st.button("🚀 PREPARAR RESULTADOS (Excel, Word y DXF)", type="primary"):
                         st.session_state['excel_data'] = generar_excel(st.session_state['poligono_usuario'], df_res)
                         st.session_state['word_data'] = generar_informe_word(area_m2/10000, area_m2, len(df_res), len(df_res)/(area_m2/10000), distancia, margen, metodo_dist, angulo_opt, st.session_state['off_x'], st.session_state['off_y'], fig_final)
                         st.session_state['dxf_data'] = generar_dxf(st.session_state['poligono_usuario'], df_res)
@@ -460,6 +460,6 @@ with tab2:
                 
                 if st.session_state.get('archivos_listos'):
                     cb1, cb2, cb3 = st.columns(3)
-                    cb1.download_button("📊 Descargar Excel", st.session_state['excel_data'], "Coordenadas_Replanteo.xlsx", use_container_width=True)
-                    cb2.download_button("📝 Descargar Word", st.session_state['word_data'], "Informe_Topografico.docx", use_container_width=True)
-                    cb3.download_button("📐 Descargar DXF", st.session_state['dxf_data'], "Plano_CAD_Replanteo.dxf", use_container_width=True)
+                    cb1.download_button("📊 Descargar Excel", st.session_state['excel_data'], "Coordenadas_Replanteo.xlsx", use_container_width=True,type='primary')
+                    cb2.download_button("📝 Descargar Word", st.session_state['word_data'], "Informe_Topografico.docx", use_container_width=True,type='primary')
+                    cb3.download_button("📐 Descargar DXF", st.session_state['dxf_data'], "Plano_CAD_Replanteo.dxf", use_container_width=True,type='primary')
