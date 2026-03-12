@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import math
 import utm
 import pandas as pd
+import json  # NUEVO: Necesario para generar GeoJSON
 from shapely.geometry import Polygon as ShapelyPolygon, Point as ShapelyPoint
 import contextily as ctx
 import io
@@ -89,18 +90,13 @@ def generar_excel(df_poligono, df_puntos, h_n):
             lon, lat = p[0], p[1]
             e, n, zn, zl = utm.from_latlon(lat, lon)
             data_poly.append({
-                'Vértice': i+1, 
-                'Latitud': lat, 
-                'Longitud': lon,
-                'UTM_X': round(e, 3),
-                'UTM_Y': round(n, 3),
-                'Huso': f"{zn}{zl}"
+                'Vértice': i+1, 'Latitud': lat, 'Longitud': lon,
+                'UTM_X': round(e, 3), 'UTM_Y': round(n, 3), 'Huso': f"{zn}{zl}"
             })
         df_poly_export = pd.DataFrame(data_poly)
         df_poly_export.to_excel(writer, sheet_name='Vertices_Parcela', index=False)
         
         df_puntos_export = df_puntos.copy()
-        
         lats, lons = [], []
         for _, row in df_puntos_export.iterrows():
             try:
@@ -111,40 +107,33 @@ def generar_excel(df_poligono, df_puntos, h_n):
                 zn = int(''.join(filter(str.isdigit, huso_str)))
                 zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
                 lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
-                lats.append(round(lat_pt, 6))
-                lons.append(round(lon_pt, 6))
+                lats.append(round(lat_pt, 6)); lons.append(round(lon_pt, 6))
             except:
                 lats.append(None); lons.append(None)
                 
         df_puntos_export['Latitud'] = lats
         df_puntos_export['Longitud'] = lons
-        
         cols = ['ID', 'Latitud', 'Longitud', 'UTM_X', 'UTM_Y', 'Huso']
         df_puntos_export = df_puntos_export[[c for c in cols if c in df_puntos_export.columns]]
         df_puntos_export.to_excel(writer, sheet_name='Puntos_Replanteo', index=False)
-        
     return output.getvalue()
 
 def generar_informe_word(area_ha, area_m2, num_puntos, pts_ha, dist, marg, metodo, angulo_opt, off_x, off_y, fig):
     doc = Document()
     doc.add_heading('INFORME TÉCNICO DE REPLANTEO', 0)
-    
     doc.add_heading('1. Datos de la Parcela:', level=1)
     doc.add_paragraph(f"• Superficie total: {area_ha:.4f} ha ({area_m2:,.2f} m²)")
     doc.add_paragraph(f"• Puntos a replantear: {num_puntos} (Densidad: {pts_ha:.0f} pts/ha)")
-
     doc.add_heading('2. Configuración de Malla:', level=1)
     doc.add_paragraph(f"• Método: {metodo}")
     doc.add_paragraph(f"• Separación: {dist:.2f} m | Distancia al borde {marg:.2f} m")
     if "OPTIMIZADO" in metodo:
         doc.add_paragraph(f"• Ángulo de rotación óptimo calculado: {angulo_opt}º")
     doc.add_paragraph(f"• Desplazamiento manual de ajuste: X={off_x:+.2f}m, Y={off_y:+.2f}m")
-
     doc.add_heading('3. Plano de Distribución:', level=1)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
         fig.savefig(tmp.name, format="png", bbox_inches="tight", dpi=300)
         doc.add_picture(tmp.name, width=Inches(6.0))
-        
     output = io.BytesIO()
     doc.save(output)
     return output.getvalue()
@@ -153,45 +142,133 @@ def generar_dxf(df_poligono, df_puntos, h_n):
     doc = ezdxf.new('R2010')
     doc.header['$PDMODE'] = 3
     doc.header['$PDSIZE'] = 1.0 
-    
     doc.layers.add(name="01_PARCELA_BORDE", color=3) 
     doc.layers.add(name="02_PUNTOS_REPLANTEO", color=1) 
     doc.layers.add(name="03_ETIQUETAS_ID", color=2) 
-    
     msp = doc.modelspace()
-    
     poly_utm = []
     for p in df_poligono:
         e, n, _, _ = utm.from_latlon(p[1], p[0], force_zone_number=h_n)
         poly_utm.append((e, n))
-        
     if poly_utm:
         msp.add_lwpolyline(poly_utm, close=True, dxfattribs={'layer': '01_PARCELA_BORDE'})
-        
     for _, row in df_puntos.iterrows():
         try:
-            if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']):
-                continue
-                
+            if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']): continue
             huso_str = str(row['Huso']) if pd.notna(row['Huso']) and str(row['Huso']).strip() != "" else f"{h_n}T"
             zn = int(''.join(filter(str.isdigit, huso_str)))
             zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
-
             lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
             x, y, _, _ = utm.from_latlon(lat_pt, lon_pt, force_zone_number=h_n)
-            
             id_pt = str(row['ID']) if pd.notna(row['ID']) else ""
-            
             msp.add_point((x, y), dxfattribs={'layer': '02_PUNTOS_REPLANTEO'})
             msp.add_text(id_pt, dxfattribs={'layer': '03_ETIQUETAS_ID', 'height': 0.8}).set_placement((x + 0.5, y + 0.5))
-        except Exception:
-            pass
-            
+        except Exception: pass
     with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tmp:
         doc.saveas(tmp.name)
     with open(tmp.name, "rb") as f:
         data = f.read()
     return data
+
+# --- NUEVOS FORMATOS GIS Y MÓVIL ---
+
+def generar_geojson(df_poligono, df_puntos):
+    features = []
+    # 1. El Polígono
+    poly_coords = [[ [float(p[0]), float(p[1])] for p in df_poligono ]]
+    if poly_coords[0][0] != poly_coords[0][-1]:  # Cerrar polígono
+        poly_coords[0].append(poly_coords[0][0])
+        
+    features.append({
+        "type": "Feature",
+        "geometry": {"type": "Polygon", "coordinates": poly_coords},
+        "properties": {"name": "Límite de Parcela", "color": "#00ffff"}
+    })
+    
+    # 2. Los Puntos
+    for _, row in df_puntos.iterrows():
+        if pd.notna(row['Latitud']) and pd.notna(row['Longitud']):
+            features.append({
+                "type": "Feature",
+                "geometry": {"type": "Point", "coordinates": [float(row['Longitud']), float(row['Latitud'])]},
+                "properties": {
+                    "name": f"PT-{row['ID']}",
+                    "UTM_X": row['UTM_X'],
+                    "UTM_Y": row['UTM_Y'],
+                    "Huso": row['Huso']
+                }
+            })
+            
+    geojson = {"type": "FeatureCollection", "features": features}
+    return json.dumps(geojson, ensure_ascii=False, indent=2).encode('utf-8')
+
+def generar_kml(df_poligono, df_puntos):
+    kml = ['<?xml version="1.0" encoding="UTF-8"?>']
+    kml.append('<kml xmlns="http://www.opengis.net/kml/2.2">')
+    kml.append('  <Document>')
+    kml.append('    <name>Prospección de Parcela.kml</name>')
+    
+    # Estilos visuales para Google Earth
+    kml.append('    <Style id="polyStyle">')
+    kml.append('      <LineStyle><color>ff00ffff</color><width>3</width></LineStyle>') # Borde Amarillo
+    kml.append('      <PolyStyle><color>4000ffff</color></PolyStyle>') # Relleno transparente
+    kml.append('    </Style>')
+    kml.append('    <Style id="ptStyle">')
+    kml.append('      <IconStyle><Icon><href>http://maps.google.com/mapfiles/kml/paddle/red-circle.png</href></Icon></IconStyle>')
+    kml.append('    </Style>')
+
+    # Poligono
+    kml.append('    <Placemark>')
+    kml.append('      <name>Límite Parcela</name>')
+    kml.append('      <styleUrl>#polyStyle</styleUrl>')
+    kml.append('      <Polygon><outerBoundaryIs><LinearRing><coordinates>')
+    coords_str = " ".join([f"{p[0]},{p[1]},0" for p in df_poligono])
+    coords_str += f" {df_poligono[0][0]},{df_poligono[0][1]},0" # Cierre
+    kml.append(f'        {coords_str}')
+    kml.append('      </coordinates></LinearRing></outerBoundaryIs></Polygon>')
+    kml.append('    </Placemark>')
+
+    # Puntos
+    for _, row in df_puntos.iterrows():
+        if pd.notna(row['Latitud']) and pd.notna(row['Longitud']):
+            id_txt = str(row['ID']) if pd.notna(row['ID']) else ""
+            kml.append('    <Placemark>')
+            kml.append(f'      <name>{id_txt}</name>')
+            # Descripción HTML para el globito al pinchar la chincheta
+            desc = f'<![CDATA[<b>Punto:</b> {id_txt}<br><b>X:</b> {row["UTM_X"]}<br><b>Y:</b> {row["UTM_Y"]}<br><b>Huso:</b> {row["Huso"]}]]>'
+            kml.append(f'      <description>{desc}</description>')
+            kml.append('      <styleUrl>#ptStyle</styleUrl>')
+            kml.append('      <Point><coordinates>')
+            kml.append(f'        {row["Longitud"]},{row["Latitud"]},0')
+            kml.append('      </coordinates></Point>')
+            kml.append('    </Placemark>')
+
+    kml.append('  </Document>')
+    kml.append('</kml>')
+    return "\n".join(kml).encode('utf-8')
+
+def generar_gpx(df_poligono, df_puntos):
+    gpx = ['<?xml version="1.0" encoding="UTF-8"?>']
+    gpx.append('<gpx version="1.1" creator="App Prospeccion Topografica" xmlns="http://www.topografix.com/GPX/1/1">')
+    
+    # Waypoints (Puntos)
+    for _, row in df_puntos.iterrows():
+        if pd.notna(row['Latitud']) and pd.notna(row['Longitud']):
+            id_txt = str(row['ID']) if pd.notna(row['ID']) else ""
+            gpx.append(f'  <wpt lat="{row["Latitud"]}" lon="{row["Longitud"]}">')
+            gpx.append(f'    <name>PT-{id_txt}</name>')
+            gpx.append(f'    <desc>UTM: {row["UTM_X"]}, {row["UTM_Y"]} (Zona {row["Huso"]})</desc>')
+            gpx.append('  </wpt>')
+            
+    # Track (Polígono Perimetral)
+    gpx.append('  <trk><name>Límite Parcela</name><trkseg>')
+    for p in df_poligono:
+        gpx.append(f'    <trkpt lat="{p[1]}" lon="{p[0]}"></trkpt>')
+    gpx.append(f'    <trkpt lat="{df_poligono[0][1]}" lon="{df_poligono[0][0]}"></trkpt>') # Cierre
+    gpx.append('  </trkseg></trk>')
+    
+    gpx.append('</gpx>')
+    return "\n".join(gpx).encode('utf-8')
 
 # ==========================================
 # --- MOTOR DE CÁLCULO GEOMÉTRICO ---
@@ -202,9 +279,7 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     lon_media = np.mean(coords_geo[:, 0])
     
     _, _, h_n, h_l = utm.from_latlon(lat_media, lon_media)
-    
     poly_m = np.array([utm.from_latlon(pt[1], pt[0], force_zone_number=h_n)[:2] for pt in coords_geo])
-    
     poligono_base = ShapelyPolygon(poly_m)
     area_m2 = poligono_base.area
 
@@ -219,7 +294,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     
     dy = dist * math.sin(math.pi/3)
     dx = dist
-    
     pasos_y = int((2 * R) / dy) + 4
     pasos_x = int((2 * R) / dx) + 4
     start_x, start_y = cx - R, cy - R
@@ -242,7 +316,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     for angulo in angulos_a_probar:
         angulo_rad = math.radians(angulo)
         cos_a, sin_a = math.cos(angulo_rad), math.sin(angulo_rad)
-        
         nx = cx + (puntos_base[:, 0] - cx) * cos_a - (puntos_base[:, 1] - cy) * sin_a + off_x
         ny = cy + (puntos_base[:, 0] - cx) * sin_a + (puntos_base[:, 1] - cy) * cos_a + off_y
         
@@ -259,7 +332,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     if len(mejores_puntos_finales) < 3:
         centro = poligono_util.representative_point()
         puntos_emergencia = [[centro.x, centro.y]]
-        
         coords_ext = list(poligono_util.exterior.coords)
         distancias = [(math.hypot(px - centro.x, py - centro.y), px, py) for px, py in coords_ext]
         distancias.sort(reverse=True, key=lambda x: x[0])
@@ -267,7 +339,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
         if len(distancias) > 0:
             p1_x, p1_y = distancias[0][1], distancias[0][2]
             puntos_emergencia.append([(centro.x + p1_x)/2, (centro.y + p1_y)/2])
-            
             if len(distancias) > 1:
                 p2_x, p2_y = distancias[1][1], distancias[1][2]
                 v1_x, v1_y = p1_x - centro.x, p1_y - centro.y
@@ -277,7 +348,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
                         p2_x, p2_y = px, py
                         break
                 puntos_emergencia.append([(centro.x + p2_x)/2, (centro.y + p2_y)/2])
-                
         mejores_puntos_finales = np.array(puntos_emergencia)
         is_rescate = True
 
@@ -285,7 +355,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     is_northern = (lat_media >= 0)
     for pt in mejores_puntos_finales:
         x_forz, y_forz = pt[0], pt[1]
-        
         la, lo = utm.to_latlon(x_forz, y_forz, h_n, northern=is_northern)
         e_nat, n_nat, zn, zl = utm.from_latlon(la, lo)
         
@@ -297,27 +366,20 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
             'UTM_Y': round(n_nat, 3), 
             'Huso': f"{zn}{zl}"
         })
-    
     df_puntos_final = pd.DataFrame(data_pts)
     return df_puntos_final, None, area_m2, mejor_angulo, is_rescate, h_n
 
-# --- NUEVA VERSIÓN DE DIBUJO CON ZOOM DE ENCUADRE MATEMÁTICO ---
 def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mejor_angulo, is_rescate, h_n, tam_letra, tam_punto, tam_ejes, zoom_margen):
     utm_poly = np.array([utm.from_latlon(la, lo, force_zone_number=h_n)[:2] for lo, la in coords_geo])
-    
     min_x, min_y = np.min(utm_poly, axis=0)
     max_x, max_y = np.max(utm_poly, axis=0)
-    
     w_real = max_x - min_x
     h_real = max_y - min_y
     if w_real == 0: w_real = 1
-    
     ratio = h_real / w_real
     
-    # Hemos vuelto al tamaño fijo estable. Streamlit ajustará automáticamente el bloque completo.
     fig_w = 6.0 
     fig_h = max(fig_w * ratio, 3.0) 
-    
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     
     ax.plot(utm_poly[:,0], utm_poly[:,1], 'k-', lw=2, label="Linde Real")
@@ -325,66 +387,53 @@ def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mej
     
     for _, row in df_puntos.iterrows():
         try:
-            if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']):
-                continue
-            
+            if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']): continue
             huso_str = str(row['Huso']) if pd.notna(row['Huso']) and str(row['Huso']).strip() != "" else f"{h_n}T"
             zn = int(''.join(filter(str.isdigit, huso_str)))
             zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
-
             lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
             x_plot, y_plot, _, _ = utm.from_latlon(lat_pt, lon_pt, force_zone_number=h_n)
             
             ax.scatter(x_plot, y_plot, c='red', s=tam_punto, edgecolor='black', lw=0.4, zorder=5)
-            
             id_txt = str(row['ID']) if pd.notna(row['ID']) else ""
-            ax.text(x_plot, y_plot, id_txt, 
-                    fontsize=tam_letra, ha='center', va='center',
-                    bbox=dict(facecolor='white', alpha=0.8, edgecolor='black', boxstyle='round,pad=0.2', lw=0.5),
-                    zorder=6)
-        except Exception:
-            pass 
+            ax.text(x_plot, y_plot, id_txt, fontsize=tam_letra, ha='center', va='center', bbox=dict(facecolor='white', alpha=0.8, edgecolor='black', boxstyle='round,pad=0.2', lw=0.5), zorder=6)
+        except Exception: pass 
     
-    if is_rescate:
-        titulo_mapa = "⚠️ Parcela pequeña: (3 Puntos)"
-    else:
-        titulo_mapa = f"Distancia entre puntos: {dist}m "
+    if is_rescate: ax.set_title("⚠️ Parcela pequeña: (3 Puntos)", pad=10, fontsize=9)
+    else: ax.set_title(f"Distancia entre puntos: {dist}m ", pad=10, fontsize=9)
     
-    ax.set_title(titulo_mapa, pad=10, fontsize=9)
     ax.set_aspect('equal')
-    
     xmin, xmax = ax.get_xlim()
     ymin, ymax = ax.get_ylim()
     w = xmax - xmin
     h = ymax - ymin
     
     if mapa_fondo != "Ninguno":
-        # Ampliamos el encuadre para descargar los tiles de fondo (así no quedan bordes blancos)
         ax.set_xlim(xmin - (w * (zoom_margen + 0.15)), xmax + (w * (zoom_margen + 0.15)))
         ax.set_ylim(ymin - (h * (zoom_margen + 0.15)), ymax + (h * (zoom_margen + 0.15)))
-        
         epsg_code = 32600 + h_n
         fuente = "https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}" if mapa_fondo == "Satélite PNOA" else "https://www.ign.es/wmts/mapa-raster?request=getTile&layer=MTN&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileCol={x}&TileRow={y}&format=image/jpeg"
         zoom_max = 19 if mapa_fondo == "Satélite PNOA" else 18
         
-        try: 
-            ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False)
-        except: 
-            try:
-                ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False, zoom=zoom_max)
-            except:
-                pass
+        xmin_cur, xmax_cur = ax.get_xlim()
+        ymin_cur, ymax_cur = ax.get_ylim()
+        diagonal_viewport = math.hypot(xmax_cur - xmin_cur, ymax_cur - ymin_cur)
+        if diagonal_viewport < 400: zoom_optimo = zoom_max
+        elif diagonal_viewport < 1000: zoom_optimo = zoom_max - 1
+        elif diagonal_viewport < 2000: zoom_optimo = zoom_max - 2
+        else: zoom_optimo = 'auto'
         
-    # AQUÍ ES DONDE APLICAMOS EL VERDADERO EFECTO DE ZOOM LIMITANDO LOS EJES
+        try: ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False, zoom=zoom_optimo)
+        except: 
+            try: ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False, zoom=zoom_max-2)
+            except: pass
+        
     ax.set_xlim(xmin - (w * zoom_margen), xmax + (w * zoom_margen))
     ax.set_ylim(ymin - (h * zoom_margen), ymax + (h * zoom_margen))
-    
     ax.tick_params(axis='y', which='major', labelsize=tam_ejes)
     ax.tick_params(axis='x', which='major', labelsize=tam_ejes, labelrotation=90)
     ax.ticklabel_format(useOffset=False, style='plain')
-    
     fig.tight_layout()
-        
     return fig
 
 # ==========================================
@@ -398,37 +447,23 @@ st.sidebar.divider()
 # VISTA 1: DIBUJO Y LOCALIZACIÓN
 # ------------------------------------------
 if vista_actual == "🗺️ 1. Dibujo y Localización":
-    
     if st.session_state['rebuild_map'] or st.session_state['map_obj'] is None:
         m = folium.Map(
-            location=st.session_state['map_center_internal'], 
-            zoom_start=st.session_state['map_zoom_internal'], 
-            max_zoom=24,
-            zoom_control=not st.session_state['map_anclado_estado'],
-            scrollWheelZoom=not st.session_state['map_anclado_estado'],
-            dragging=not st.session_state['map_anclado_estado'],
-            doubleClickZoom=not st.session_state['map_anclado_estado']
+            location=st.session_state['map_center_internal'], zoom_start=st.session_state['map_zoom_internal'], max_zoom=24,
+            zoom_control=not st.session_state['map_anclado_estado'], scrollWheelZoom=not st.session_state['map_anclado_estado'],
+            dragging=not st.session_state['map_anclado_estado'], doubleClickZoom=not st.session_state['map_anclado_estado']
         )
-        
         url_pnoa = "https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}"
         url_mtn = "https://www.ign.es/wmts/mapa-raster?request=getTile&layer=MTN&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileCol={x}&TileRow={y}&format=image/jpeg"
-        
         capa_seleccionada = st.session_state['old_capa']
         zoom_nativo_maximo = 19 if capa_seleccionada == "Satélite PNOA" else 18
-        
-        folium.TileLayer(
-            tiles=(url_pnoa if capa_seleccionada == "Satélite PNOA" else url_mtn), 
-            attr="IGN",
-            max_native_zoom=zoom_nativo_maximo,
-            max_zoom=24
-        ).add_to(m)
+        folium.TileLayer(tiles=(url_pnoa if capa_seleccionada == "Satélite PNOA" else url_mtn), attr="IGN", max_native_zoom=zoom_nativo_maximo, max_zoom=24).add_to(m)
 
         if 'poligono_usuario' in st.session_state:
             coords_f = [[p[1], p[0]] for p in st.session_state['poligono_usuario']]
             folium.Polygon(locations=coords_f, color="#FFD700", fill=True, fill_opacity=0.3).add_to(m)
 
         Draw(export=False, position='topleft', draw_options={'polyline':False, 'rectangle':False, 'circle':False, 'marker':False, 'circlemarker':False}).add_to(m)
-        
         st.session_state['map_obj'] = m
         st.session_state['rebuild_map'] = False
 
@@ -437,19 +472,15 @@ if vista_actual == "🗺️ 1. Dibujo y Localización":
     if output_mapa and output_mapa.get("center"):
         c_lat, c_lon = output_mapa["center"]["lat"], output_mapa["center"]["lng"]
         c_zoom = output_mapa.get("zoom", st.session_state['map_zoom_internal'])
-        
         old_lat, old_lon = st.session_state['map_center_internal']
-        
         if abs(c_lat - old_lat) > 0.0001 or abs(c_lon - old_lon) > 0.0001 or c_zoom != st.session_state['map_zoom_internal']:
             st.session_state['map_center_internal'] = [c_lat, c_lon]
             st.session_state['map_zoom_internal'] = c_zoom
-            
             try:
                 e_new, n_new, h_new, _ = utm.from_latlon(c_lat, c_lon)
                 st.session_state['txt_x'] = round(e_new, 2)
                 st.session_state['txt_y'] = round(n_new, 2)
                 st.session_state['txt_h'] = h_new
-                
                 st.session_state['ui_utm_x'] = round(e_new, 2)
                 st.session_state['ui_utm_y'] = round(n_new, 2)
                 st.session_state['ui_utm_h'] = h_new
@@ -466,7 +497,6 @@ if vista_actual == "🗺️ 1. Dibujo y Localización":
 
     with st.sidebar:
         st.subheader("Herramientas del Mapa")
-        
         if 'ui_utm_x' not in st.session_state: st.session_state['ui_utm_x'] = st.session_state['txt_x']
         if 'ui_utm_y' not in st.session_state: st.session_state['ui_utm_y'] = st.session_state['txt_y']
         if 'ui_utm_h' not in st.session_state: st.session_state['ui_utm_h'] = st.session_state['txt_h']
@@ -484,7 +514,6 @@ if vista_actual == "🗺️ 1. Dibujo y Localización":
         st.number_input("UTM Este (X):", format="%.2f", step=100.0, key="ui_utm_x", on_change=manual_utm_change)
         st.number_input("UTM Norte (Y):", format="%.2f", step=100.0, key="ui_utm_y", on_change=manual_utm_change)
         st.number_input("Huso:", min_value=28, max_value=31, step=1, key="ui_utm_h", on_change=manual_utm_change)
-        
         st.divider()
         
         def al_cambiar_capa():
@@ -493,24 +522,17 @@ if vista_actual == "🗺️ 1. Dibujo y Localización":
             
         idx_capa = 0 if st.session_state['old_capa'] == "Satélite PNOA" else 1
         st.radio("Capa Base IGN:", ["Satélite PNOA", "Topográfico MTN"], index=idx_capa, key="ui_capa_base", on_change=al_cambiar_capa)
-
         st.divider()
         
         def toggle_anclaje():
             st.session_state['map_anclado_estado'] = st.session_state['ui_toggle_anclaje']
             st.session_state['rebuild_map'] = True
 
-        st.toggle(
-            "🔒 Anclar Mapa (Bloquea movimiento)", 
-            value=st.session_state['map_anclado_estado'],
-            key="ui_toggle_anclaje", 
-            on_change=toggle_anclaje
-        )
-
+        st.toggle("🔒 Anclar Mapa (Bloquea movimiento)", value=st.session_state['map_anclado_estado'], key="ui_toggle_anclaje", on_change=toggle_anclaje)
         st.divider()
+        
         def borrar_poligono():
-            if 'poligono_usuario' in st.session_state:
-                del st.session_state['poligono_usuario']
+            if 'poligono_usuario' in st.session_state: del st.session_state['poligono_usuario']
             st.session_state['rebuild_map'] = True
 
         st.button("🗑️ Borrar Polígono", use_container_width=True, type="primary", on_click=borrar_poligono)
@@ -532,35 +554,26 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
             metodo_dist = st.selectbox("Método:", ["Hexagonal Normal (Norte-Sur)", "Hexagonal OPTIMIZADO (Búsqueda del Máximo)"], on_change=resetear_calculo)
             distancia = st.number_input("📏 Distancia (m):", min_value=1.0, value=25.0, step=0.5, on_change=resetear_calculo)
             margen = st.number_input("🛡️ Margen (m):", min_value=0.0, value=1.0, step=0.5, on_change=resetear_calculo)
-            
             st.divider()
             st.subheader("💎 Ajuste Fino")
             paso = st.number_input("Paso de desplazamiento (m):", min_value=0.01, value=1.00, step=0.50, format="%.2f")
-            
             st.markdown("<div style='text-align: center; margin-bottom: 5px; font-size: 0.9em;'>Desplazamiento:<br><b>X: {:.2f}m | Y: {:.2f}m</b></div>".format(st.session_state['off_x'], st.session_state['off_y']), unsafe_allow_html=True)
-            
             c1, c2, c3 = st.columns([1, 1.2, 1])
             with c2: st.button("⬆️ N", on_click=mover_malla, args=(0, paso), use_container_width=True)
-            
             c4, c5, c6 = st.columns([1, 1.2, 1])
             with c4: st.button("⬅️ O", on_click=mover_malla, args=(-paso, 0), use_container_width=True)
             with c5: st.button("🔄", on_click=resetear_malla, use_container_width=True)
             with c6: st.button("➡️ E", on_click=mover_malla, args=(paso, 0), use_container_width=True)
-            
             c7, c8, c9 = st.columns([1, 1.2, 1])
             with c8: st.button("⬇️ S", on_click=mover_malla, args=(0, -paso), use_container_width=True)
-
             st.divider()
             st.subheader("🎨 Visualización")
             mapa_final = st.radio("Fondo Final:", ["Satélite PNOA", "Topográfico MTN", "Ninguno"], on_change=limpiar_archivos)
             opacidad_final = st.slider("Opacidad Parcela:", 0.0, 1.0, 0.3, on_change=limpiar_archivos)
-            
             tam_letra = st.slider("🔠 Tamaño ID Puntos:", 4, 30, 8, on_change=limpiar_archivos)
             tam_punto = st.slider("🔴 Tamaño del Punto:", 1, 100, 12, on_change=limpiar_archivos)
             tam_ejes = st.slider("📏 Tamaño Textos Coordenadas:", 4, 20, 7, on_change=limpiar_archivos)
-            
             st.divider()
-            # EL NUEVO CONTROL DE ZOOM VERDADERO
             zoom_margen = st.slider("🔍 Zoom / Margen del Plano:", 0.0, 1.0, 0.15, step=0.05, help="0.0 es muy cerca, 1.0 aleja la cámara", on_change=limpiar_archivos)
 
         texto_carga = 'Calculando rotación óptima...' if 'OPTIMIZADO' in metodo_dist else 'Procesando Malla...'
@@ -570,9 +583,7 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
                     st.session_state['poligono_usuario'], distancia, margen, 
                     metodo_dist, st.session_state['off_x'], st.session_state['off_y']
                 )
-                if error:
-                    st.error(error)
-                    st.stop()
+                if error: st.error(error); st.stop()
                 else:
                     st.session_state['df_puntos_actual'] = df_res
                     st.session_state['area_m2'] = area_m2
@@ -586,26 +597,23 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
         is_rescate = st.session_state['is_rescate']
         h_n = st.session_state['h_n']
 
-        if is_rescate:
-            st.warning("⚠️ El área de la parcela es muy pequeña o la distancia muy grande. Se han generado 3 puntos de control para orientar la base.")
+        if is_rescate: st.warning("⚠️ El área de la parcela es muy pequeña o la distancia muy grande. Se han generado 3 puntos de control para orientar la base.")
         
         m1, m2, m3 = st.columns(3)
-        if "OPTIMIZADO" in metodo_dist and not is_rescate:
-            m1.metric("Puntos Activos", f"{len(df_actual)} pts", delta=f"Rotado {angulo_opt}º", delta_color="normal")
-        else:
-            m1.metric("Puntos Activos", f"{len(df_actual)} pts")
+        if "OPTIMIZADO" in metodo_dist and not is_rescate: m1.metric("Puntos Activos", f"{len(df_actual)} pts", delta=f"Rotado {angulo_opt}º", delta_color="normal")
+        else: m1.metric("Puntos Activos", f"{len(df_actual)} pts")
         m2.metric("Área Útil", f"{area_m2:.2f} m2")
         
-        if area_m2 > 0:
-            m3.metric("Densidad Resultante", f"{len(df_actual)/(area_m2/10000):.0f} pts/ha")
-        else:
-            m3.metric("Densidad Resultante", "0 pts/ha")
+        if area_m2 > 0: m3.metric("Densidad Resultante", f"{len(df_actual)/(area_m2/10000):.0f} pts/ha")
+        else: m3.metric("Densidad Resultante", "0 pts/ha")
         
         col_plano, col_tabla = st.columns([1.4, 1.1]) 
         
         with col_tabla:
             st.markdown("📝 **Editor de Puntos** *(Suprime filas o edita IDs)*")
-            df_editado = st.data_editor(
+            
+            # ATENCIÓN: Extraemos el DataFrame visible limpio por si el usuario lo edita (evita colapso por NaNs geográficos)
+            df_editado_crudo = st.data_editor(
                 df_actual,
                 num_rows="dynamic",
                 use_container_width=True,
@@ -622,31 +630,60 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
                 key="editor_tabla"
             )
             
+            # Recalculamos internamente las latitudes de las filas editadas
+            lats, lons = [], []
+            for _, row in df_editado_crudo.iterrows():
+                try:
+                    if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']):
+                        lats.append(None); lons.append(None)
+                        continue
+                    huso_str = str(row['Huso']) if pd.notna(row['Huso']) and str(row['Huso']).strip() != "" else f"{h_n}T"
+                    zn = int(''.join(filter(str.isdigit, huso_str)))
+                    zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
+                    lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
+                    lats.append(lat_pt); lons.append(lon_pt)
+                except:
+                    lats.append(None); lons.append(None)
+            
+            df_editado = df_editado_crudo.copy()
+            df_editado['Latitud'] = lats
+            df_editado['Longitud'] = lons
+            
             if not df_editado.equals(df_actual):
                 st.session_state['df_puntos_actual'] = df_editado
                 limpiar_archivos() 
                 st.rerun()
         
         with col_plano:
-            # INVOCAMOS A LA FUNCIÓN CON LA NUEVA VARIABLE DE ZOOM MARGEN
-            fig_final = dibujar_plano(
-                st.session_state['poligono_usuario'], df_editado, 
-                mapa_final, opacidad_final, metodo_dist, distancia, 
-                angulo_opt, is_rescate, h_n, tam_letra, tam_punto, tam_ejes, zoom_margen
-            )
-            st.pyplot(fig_final, use_container_width=True)
+            with st.spinner("🗺️ Descargando mapa base IGN y renderizando el plano..."):
+                fig_final = dibujar_plano(
+                    st.session_state['poligono_usuario'], df_editado, 
+                    mapa_final, opacidad_final, metodo_dist, distancia, 
+                    angulo_opt, is_rescate, h_n, tam_letra, tam_punto, tam_ejes, zoom_margen
+                )
+                st.pyplot(fig_final, use_container_width=True)
         
         st.divider()
         if not st.session_state.get('archivos_listos'):
-            if st.button("🚀 PREPARAR RESULTADOS (Excel, Word y DXF)", type="primary"):
+            if st.button("🚀 PREPARAR RESULTADOS (Excel, Word, DXF, KML...)", type="primary"):
                 st.session_state['excel_data'] = generar_excel(st.session_state['poligono_usuario'], df_editado, h_n)
                 st.session_state['word_data'] = generar_informe_word(area_m2/10000, area_m2, len(df_editado), len(df_editado)/(area_m2/10000) if area_m2 > 0 else 0, distancia, margen, metodo_dist, angulo_opt, st.session_state['off_x'], st.session_state['off_y'], fig_final)
                 st.session_state['dxf_data'] = generar_dxf(st.session_state['poligono_usuario'], df_editado, h_n)
+                st.session_state['kml_data'] = generar_kml(st.session_state['poligono_usuario'], df_editado)
+                st.session_state['gpx_data'] = generar_gpx(st.session_state['poligono_usuario'], df_editado)
+                st.session_state['geojson_data'] = generar_geojson(st.session_state['poligono_usuario'], df_editado)
                 st.session_state['archivos_listos'] = True
                 st.rerun()
         
         if st.session_state.get('archivos_listos'):
+            st.markdown("### 📥 Descargas de Oficina (CAD e Informes)")
             cb1, cb2, cb3 = st.columns(3)
             cb1.download_button("📊 Excel", st.session_state['excel_data'], "Coordenadas_Replanteo.xlsx", use_container_width=True, type='primary')
             cb2.download_button("📝 Word", st.session_state['word_data'], "Informe_Topografico.docx", use_container_width=True, type='primary')
-            cb3.download_button("📐 DXF", st.session_state['dxf_data'], "Plano_CAD_Replanteo.dxf", use_container_width=True, type='primary')
+            cb3.download_button("📐 DXF (AutoCAD)", st.session_state['dxf_data'], "Plano_CAD_Replanteo.dxf", use_container_width=True, type='primary')
+            
+            st.markdown("### 🌍 Exportaciones para Móvil y GIS")
+            cb4, cb5, cb6 = st.columns(3)
+            cb4.download_button("🌍 KML (Google Earth/Maps)", st.session_state['kml_data'], "Parcela_y_Puntos.kml", use_container_width=True, type='primary')
+            cb5.download_button("🧭 GPX (Apps GPS Móviles)", st.session_state['gpx_data'], "Ruta_y_Waypoints.gpx", use_container_width=True, type='primary')
+            cb6.download_button("🌐 GeoJSON (QGIS / Web)", st.session_state['geojson_data'], "Datos_Espaciales.geojson", use_container_width=True, type='primary')

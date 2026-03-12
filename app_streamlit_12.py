@@ -81,7 +81,7 @@ def calcular_area_poligono(coords_geo):
 # --- EXPORTACIÓN MULTIFORMATO ---
 # ==========================================
 
-def generar_excel(df_poligono, df_puntos):
+def generar_excel(df_poligono, df_puntos, h_n):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         data_poly = []
@@ -100,8 +100,27 @@ def generar_excel(df_poligono, df_puntos):
         df_poly_export.to_excel(writer, sheet_name='Vertices_Parcela', index=False)
         
         df_puntos_export = df_puntos.copy()
+        
+        lats, lons = [], []
+        for _, row in df_puntos_export.iterrows():
+            try:
+                if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']):
+                    lats.append(None); lons.append(None)
+                    continue
+                huso_str = str(row['Huso']) if pd.notna(row['Huso']) and str(row['Huso']).strip() != "" else f"{h_n}T"
+                zn = int(''.join(filter(str.isdigit, huso_str)))
+                zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
+                lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
+                lats.append(round(lat_pt, 6))
+                lons.append(round(lon_pt, 6))
+            except:
+                lats.append(None); lons.append(None)
+                
+        df_puntos_export['Latitud'] = lats
+        df_puntos_export['Longitud'] = lons
+        
         cols = ['ID', 'Latitud', 'Longitud', 'UTM_X', 'UTM_Y', 'Huso']
-        df_puntos_export = df_puntos_export[cols]
+        df_puntos_export = df_puntos_export[[c for c in cols if c in df_puntos_export.columns]]
         df_puntos_export.to_excel(writer, sheet_name='Puntos_Replanteo', index=False)
         
     return output.getvalue()
@@ -150,12 +169,24 @@ def generar_dxf(df_poligono, df_puntos, h_n):
         msp.add_lwpolyline(poly_utm, close=True, dxfattribs={'layer': '01_PARCELA_BORDE'})
         
     for _, row in df_puntos.iterrows():
-        x, y, _, _ = utm.from_latlon(row['Latitud'], row['Longitud'], force_zone_number=h_n)
-        id_pt = str(row['ID'])
-        
-        msp.add_point((x, y), dxfattribs={'layer': '02_PUNTOS_REPLANTEO'})
-        msp.add_text(id_pt, dxfattribs={'layer': '03_ETIQUETAS_ID', 'height': 0.8}).set_placement((x + 0.5, y + 0.5))
-        
+        try:
+            if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']):
+                continue
+                
+            huso_str = str(row['Huso']) if pd.notna(row['Huso']) and str(row['Huso']).strip() != "" else f"{h_n}T"
+            zn = int(''.join(filter(str.isdigit, huso_str)))
+            zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
+
+            lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
+            x, y, _, _ = utm.from_latlon(lat_pt, lon_pt, force_zone_number=h_n)
+            
+            id_pt = str(row['ID']) if pd.notna(row['ID']) else ""
+            
+            msp.add_point((x, y), dxfattribs={'layer': '02_PUNTOS_REPLANTEO'})
+            msp.add_text(id_pt, dxfattribs={'layer': '03_ETIQUETAS_ID', 'height': 0.8}).set_placement((x + 0.5, y + 0.5))
+        except Exception:
+            pass
+            
     with tempfile.NamedTemporaryFile(suffix=".dxf", delete=False) as tmp:
         doc.saveas(tmp.name)
     with open(tmp.name, "rb") as f:
@@ -270,8 +301,7 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     df_puntos_final = pd.DataFrame(data_pts)
     return df_puntos_final, None, area_m2, mejor_angulo, is_rescate, h_n
 
-# --- FUNCIÓN DE DIBUJO ACTUALIZADA CON PARÁMETROS DE TAMAÑO ---
-def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mejor_angulo, is_rescate, h_n, tam_letra, tam_figura, tam_punto, tam_ejes):
+def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mejor_angulo, is_rescate, h_n, tam_letra, tam_punto, tam_ejes, zoom_margen):
     utm_poly = np.array([utm.from_latlon(la, lo, force_zone_number=h_n)[:2] for lo, la in coords_geo])
     
     min_x, min_y = np.min(utm_poly, axis=0)
@@ -283,7 +313,8 @@ def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mej
     
     ratio = h_real / w_real
     
-    fig_w = float(tam_figura)
+    # Tamaño base fijo para que Streamlit se encargue de escalarlo
+    fig_w = 6.0 
     fig_h = max(fig_w * ratio, 3.0) 
     
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
@@ -292,13 +323,26 @@ def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mej
     ax.fill(utm_poly[:,0], utm_poly[:,1], alpha=opacidad, color='cyan')
     
     for _, row in df_puntos.iterrows():
-        x_plot, y_plot, _, _ = utm.from_latlon(row['Latitud'], row['Longitud'], force_zone_number=h_n)
-        # Aplicamos el tamaño del punto personalizado (tam_punto)
-        ax.scatter(x_plot, y_plot, c='red', s=tam_punto, edgecolor='black', lw=0.4, zorder=5)
-        ax.text(x_plot, y_plot, str(row['ID']), 
-                fontsize=tam_letra, ha='center', va='center',
-                bbox=dict(facecolor='white', alpha=0.8, edgecolor='black', boxstyle='round,pad=0.2', lw=0.5),
-                zorder=6)
+        try:
+            if pd.isna(row['UTM_X']) or pd.isna(row['UTM_Y']):
+                continue
+            
+            huso_str = str(row['Huso']) if pd.notna(row['Huso']) and str(row['Huso']).strip() != "" else f"{h_n}T"
+            zn = int(''.join(filter(str.isdigit, huso_str)))
+            zl = ''.join(filter(str.isalpha, huso_str)) or 'T'
+
+            lat_pt, lon_pt = utm.to_latlon(float(row['UTM_X']), float(row['UTM_Y']), zn, zl)
+            x_plot, y_plot, _, _ = utm.from_latlon(lat_pt, lon_pt, force_zone_number=h_n)
+            
+            ax.scatter(x_plot, y_plot, c='red', s=tam_punto, edgecolor='black', lw=0.4, zorder=5)
+            
+            id_txt = str(row['ID']) if pd.notna(row['ID']) else ""
+            ax.text(x_plot, y_plot, id_txt, 
+                    fontsize=tam_letra, ha='center', va='center',
+                    bbox=dict(facecolor='white', alpha=0.8, edgecolor='black', boxstyle='round,pad=0.2', lw=0.5),
+                    zorder=6)
+        except Exception:
+            pass 
     
     if is_rescate:
         titulo_mapa = "⚠️ Parcela pequeña: (3 Puntos)"
@@ -314,25 +358,37 @@ def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mej
     h = ymax - ymin
     
     if mapa_fondo != "Ninguno":
-        ax.set_xlim(xmin - (w * 0.5), xmax + (w * 0.5))
-        ax.set_ylim(ymin - (h * 0.5), ymax + (h * 0.5))
+        ax.set_xlim(xmin - (w * (zoom_margen + 0.15)), xmax + (w * (zoom_margen + 0.15)))
+        ax.set_ylim(ymin - (h * (zoom_margen + 0.15)), ymax + (h * (zoom_margen + 0.15)))
         
         epsg_code = 32600 + h_n
         fuente = "https://www.ign.es/wmts/pnoa-ma?request=GetTile&service=WMTS&version=1.0.0&Layer=OI.OrthoimageCoverage&Style=default&Format=image/jpeg&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileRow={y}&TileCol={x}" if mapa_fondo == "Satélite PNOA" else "https://www.ign.es/wmts/mapa-raster?request=getTile&layer=MTN&TileMatrixSet=GoogleMapsCompatible&TileMatrix={z}&TileCol={x}&TileRow={y}&format=image/jpeg"
         zoom_max = 19 if mapa_fondo == "Satélite PNOA" else 18
         
+        xmin_cur, xmax_cur = ax.get_xlim()
+        ymin_cur, ymax_cur = ax.get_ylim()
+        diagonal_viewport = math.hypot(xmax_cur - xmin_cur, ymax_cur - ymin_cur)
+        
+        if diagonal_viewport < 400: 
+            zoom_optimo = zoom_max
+        elif diagonal_viewport < 1000:
+            zoom_optimo = zoom_max - 1
+        elif diagonal_viewport < 2000:
+            zoom_optimo = zoom_max - 2
+        else:
+            zoom_optimo = 'auto'
+        
         try: 
-            ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False)
+            ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False, zoom=zoom_optimo)
         except: 
             try:
-                ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False, zoom=zoom_max)
+                ctx.add_basemap(ax, crs=f"EPSG:{epsg_code}", source=fuente, alpha=1.0, reset_extent=False, zoom=zoom_max-2)
             except:
                 pass
         
-    ax.set_xlim(xmin - (w * 0.15), xmax + (w * 0.15))
-    ax.set_ylim(ymin - (h * 0.15), ymax + (h * 0.15))
+    ax.set_xlim(xmin - (w * zoom_margen), xmax + (w * zoom_margen))
+    ax.set_ylim(ymin - (h * zoom_margen), ymax + (h * zoom_margen))
     
-    # Aplicamos el tamaño de los números de las coordenadas (tam_ejes)
     ax.tick_params(axis='y', which='major', labelsize=tam_ejes)
     ax.tick_params(axis='x', which='major', labelsize=tam_ejes, labelrotation=90)
     ax.ticklabel_format(useOffset=False, style='plain')
@@ -509,13 +565,12 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
             mapa_final = st.radio("Fondo Final:", ["Satélite PNOA", "Topográfico MTN", "Ninguno"], on_change=limpiar_archivos)
             opacidad_final = st.slider("Opacidad Parcela:", 0.0, 1.0, 0.3, on_change=limpiar_archivos)
             
-            # --- NUEVOS CONTROLES DE TAMAÑO ---
             tam_letra = st.slider("🔠 Tamaño ID Puntos:", 4, 30, 8, on_change=limpiar_archivos)
             tam_punto = st.slider("🔴 Tamaño del Punto:", 1, 100, 12, on_change=limpiar_archivos)
             tam_ejes = st.slider("📏 Tamaño Textos Coordenadas:", 4, 20, 7, on_change=limpiar_archivos)
             
             st.divider()
-            tam_figura = st.slider("🖼️ Escala/Zoom del Plano:", 4.0, 15.0, 6.0, step=0.5, on_change=limpiar_archivos)
+            zoom_margen = st.slider("🔍 Zoom / Margen del Plano:", 0.0, 1.0, 0.15, step=0.05, help="0.0 es muy cerca, 1.0 aleja la cámara", on_change=limpiar_archivos)
 
         texto_carga = 'Calculando rotación óptima...' if 'OPTIMIZADO' in metodo_dist else 'Procesando Malla...'
         with st.spinner(texto_carga):
@@ -555,7 +610,7 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
         else:
             m3.metric("Densidad Resultante", "0 pts/ha")
         
-        col_plano, col_tabla = st.columns([1.6, 1])
+        col_plano, col_tabla = st.columns([1.4, 1.1]) 
         
         with col_tabla:
             st.markdown("📝 **Editor de Puntos** *(Suprime filas o edita IDs)*")
@@ -564,13 +619,14 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
                 num_rows="dynamic",
                 use_container_width=True,
                 hide_index=True,
+                height=550,
                 column_config={
                     "Latitud": None,
                     "Longitud": None,
-                    "ID": st.column_config.Column("ID", width="small"),
-                    "UTM_X": st.column_config.NumberColumn("UTM X", format="%.3f", width="medium"),
-                    "UTM_Y": st.column_config.NumberColumn("UTM Y", format="%.3f", width="medium"),
-                    "Huso": st.column_config.Column("Huso", width="small")
+                    "ID": st.column_config.TextColumn("ID", width="small", max_chars=5),
+                    "UTM_X": st.column_config.NumberColumn("UTM X (m)", format="%.3f", step=0.001), 
+                    "UTM_Y": st.column_config.NumberColumn("UTM Y (m)", format="%.3f", step=0.001),
+                    "Huso": st.column_config.TextColumn("Huso", width="small")
                 },
                 key="editor_tabla"
             )
@@ -581,18 +637,19 @@ elif vista_actual == "⚙️ 2. Configuración y Resultados":
                 st.rerun()
         
         with col_plano:
-            # --- PASAMOS LAS NUEVAS VARIABLES DE TAMAÑO ---
-            fig_final = dibujar_plano(
-                st.session_state['poligono_usuario'], df_editado, 
-                mapa_final, opacidad_final, metodo_dist, distancia, 
-                angulo_opt, is_rescate, h_n, tam_letra, tam_figura, tam_punto, tam_ejes
-            )
-            st.pyplot(fig_final, use_container_width=True)
+            with st.spinner("🗺️ Descargando mapa base IGN y renderizando el plano..."):
+                # FIX: Se quitó tam_figura de esta llamada
+                fig_final = dibujar_plano(
+                    st.session_state['poligono_usuario'], df_editado, 
+                    mapa_final, opacidad_final, metodo_dist, distancia, 
+                    angulo_opt, is_rescate, h_n, tam_letra, tam_punto, tam_ejes, zoom_margen
+                )
+                st.pyplot(fig_final, use_container_width=True)
         
         st.divider()
         if not st.session_state.get('archivos_listos'):
             if st.button("🚀 PREPARAR RESULTADOS (Excel, Word y DXF)", type="primary"):
-                st.session_state['excel_data'] = generar_excel(st.session_state['poligono_usuario'], df_editado)
+                st.session_state['excel_data'] = generar_excel(st.session_state['poligono_usuario'], df_editado, h_n)
                 st.session_state['word_data'] = generar_informe_word(area_m2/10000, area_m2, len(df_editado), len(df_editado)/(area_m2/10000) if area_m2 > 0 else 0, distancia, margen, metodo_dist, angulo_opt, st.session_state['off_x'], st.session_state['off_y'], fig_final)
                 st.session_state['dxf_data'] = generar_dxf(st.session_state['poligono_usuario'], df_editado, h_n)
                 st.session_state['archivos_listos'] = True
