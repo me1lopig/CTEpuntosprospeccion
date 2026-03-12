@@ -50,6 +50,12 @@ if 'map_zoom_internal' not in st.session_state: st.session_state['map_zoom_inter
 if 'txt_x' not in st.session_state: st.session_state['txt_x'] = 450000.0
 if 'txt_y' not in st.session_state: st.session_state['txt_y'] = 4370000.0
 if 'txt_h' not in st.session_state: st.session_state['txt_h'] = 30
+
+# Nuevas variables en memoria para sincronizar casillas y mapa
+if 'in_utm_x' not in st.session_state: st.session_state['in_utm_x'] = 450000.0
+if 'in_utm_y' not in st.session_state: st.session_state['in_utm_y'] = 4370000.0
+if 'in_utm_h' not in st.session_state: st.session_state['in_utm_h'] = 30
+
 if 'off_x' not in st.session_state: st.session_state['off_x'] = 0.0
 if 'off_y' not in st.session_state: st.session_state['off_y'] = 0.0
 
@@ -73,7 +79,6 @@ def centrar_mapa_desde_texto():
 def generar_excel(df_poligono, df_puntos):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # Pestaña 1: Polígono
         data_poly = []
         for i, p in enumerate(df_poligono):
             lon, lat = p[0], p[1]
@@ -89,7 +94,6 @@ def generar_excel(df_poligono, df_puntos):
         df_poly_export = pd.DataFrame(data_poly)
         df_poly_export.to_excel(writer, sheet_name='Vertices_Parcela', index=False)
         
-        # Pestaña 2: Puntos de Replanteo (Cálculo dinámico de Lat/Lon)
         df_puntos_export = df_puntos.copy()
         lats, lons = [], []
         
@@ -106,7 +110,6 @@ def generar_excel(df_poligono, df_puntos):
                 lats.append(None)
                 lons.append(None)
                 
-        # Insertamos Lat y Lon en las posiciones 1 y 2
         df_puntos_export.insert(1, 'Latitud', lats)
         df_puntos_export.insert(2, 'Longitud', lons)
         
@@ -140,13 +143,12 @@ def generar_informe_word(area_ha, area_m2, num_puntos, pts_ha, dist, marg, metod
 
 def generar_dxf(df_poligono, df_puntos):
     doc = ezdxf.new('R2010')
-    
     doc.header['$PDMODE'] = 3
     doc.header['$PDSIZE'] = 1.0 
     
-    doc.layers.add(name="01_PARCELA_BORDE", color=3) # Verde
-    doc.layers.add(name="02_PUNTOS_REPLANTEO", color=1) # Rojo
-    doc.layers.add(name="03_ETIQUETAS_ID", color=2) # Amarillo
+    doc.layers.add(name="01_PARCELA_BORDE", color=3) 
+    doc.layers.add(name="02_PUNTOS_REPLANTEO", color=1) 
+    doc.layers.add(name="03_ETIQUETAS_ID", color=2) 
     
     msp = doc.modelspace()
     
@@ -236,7 +238,7 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
             mejores_puntos_finales = puntos_validos
             mejor_angulo = angulo
 
-    # Protocolo de rescate para mallas con menos de 3 puntos
+    # Protocolo de rescate original (3 Puntos)
     if len(mejores_puntos_finales) < 3:
         centro = poligono_util.representative_point()
         puntos_emergencia = [[centro.x, centro.y]]
@@ -279,7 +281,6 @@ def calcular_malla(coords_geo, dist, marg, metodo, off_x, off_y):
     return df_puntos_final, None, area_m2, mejor_angulo, ("RESCATE" in metodo), h_n
 
 def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mejor_angulo, is_rescate, h_n, tam_letra):
-    # Calcular la forma del polígono para adaptar el lienzo
     utm_poly = np.array([[utm.from_latlon(la, lo)[0], utm.from_latlon(la, lo)[1]] for lo, la in coords_geo])
     min_x, min_y = np.min(utm_poly, axis=0)
     max_x, max_y = np.max(utm_poly, axis=0)
@@ -290,7 +291,7 @@ def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mej
     
     ratio = h_real / w_real
     fig_w = 6.0
-    fig_h = min(max(fig_w * ratio, 4.0), 7.5) # Limitar para evitar lienzos extremos
+    fig_h = min(max(fig_w * ratio, 4.0), 7.5) 
     
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
     
@@ -340,7 +341,6 @@ def dibujar_plano(coords_geo, df_puntos, mapa_fondo, opacidad, metodo, dist, mej
     ax.tick_params(axis='x', which='major', labelsize=7, labelrotation=90)
     ax.ticklabel_format(useOffset=False, style='plain')
     
-    # Recortar espacios blancos del lienzo
     fig.tight_layout()
         
     return fig
@@ -408,6 +408,11 @@ with tab1:
                     st.session_state['txt_x'] = round(e_new, 2)
                     st.session_state['txt_y'] = round(n_new, 2)
                     st.session_state['txt_h'] = h_new
+                    
+                    # ---> LÍNEAS CORREGIDAS PARA ACTUALIZAR DIRECTAMENTE LAS CASILLAS <---
+                    st.session_state['in_utm_x'] = round(e_new, 2)
+                    st.session_state['in_utm_y'] = round(n_new, 2)
+                    st.session_state['in_utm_h'] = h_new
                 except: pass
 
         if output_mapa and output_mapa.get("all_drawings") and len(output_mapa["all_drawings"]) > 0:
@@ -416,33 +421,43 @@ with tab1:
                 st.session_state['poligono_usuario'] = np.array(nuevas_coords)
                 st.toast("✅ Polígono guardado. Ve a la Pestaña 2.")
                 st.session_state['rebuild_map'] = True
+                
+                # BUGFIX: Limpiamos los puntos calculados anteriores al hacer uno nuevo
+                resetear_calculo() 
+                
                 st.rerun()
 
     with col_ctrl:
         st.subheader("Centro del Mapa (UTM)")
         
-        ux_in = st.number_input("UTM Este (X):", value=float(st.session_state['txt_x']), format="%.2f", step=100.0)
-        uy_in = st.number_input("UTM Norte (Y):", value=float(st.session_state['txt_y']), format="%.2f", step=100.0)
-        h_in = st.number_input("Huso:", min_value=28, max_value=31, value=int(st.session_state['txt_h']), step=1)
-        
-        if ux_in != st.session_state['txt_x'] or uy_in != st.session_state['txt_y'] or h_in != st.session_state['txt_h']:
-            st.session_state['txt_x'] = ux_in
-            st.session_state['txt_y'] = uy_in
-            st.session_state['txt_h'] = h_in
+        # --- FUNCIONES CALLBACK PARA ACTUALIZAR SIN ROMPER LA MEMORIA ---
+        def al_cambiar_utm():
+            st.session_state['txt_x'] = st.session_state['in_utm_x']
+            st.session_state['txt_y'] = st.session_state['in_utm_y']
+            st.session_state['txt_h'] = st.session_state['in_utm_h']
             try:
-                lat, lon = utm.to_latlon(ux_in, uy_in, h_in, northern=True)
+                lat, lon = utm.to_latlon(st.session_state['in_utm_x'], st.session_state['in_utm_y'], st.session_state['in_utm_h'], northern=True)
                 st.session_state['map_center_internal'] = [lat, lon]
                 st.session_state['rebuild_map'] = True
-                st.rerun()
             except: pass
+
+        def al_cambiar_capa():
+            st.session_state['old_capa'] = st.session_state['capa_base_selector']
+            st.session_state['rebuild_map'] = True
+            
+        def borrar_poligono():
+            if 'poligono_usuario' in st.session_state:
+                del st.session_state['poligono_usuario']
+            st.session_state['rebuild_map'] = True
+        # ----------------------------------------------------------------
+        
+        # Quitamos "value=" para que dependan puramente del Session State
+        st.number_input("UTM Este (X):", format="%.2f", step=100.0, key="in_utm_x", on_change=al_cambiar_utm)
+        st.number_input("UTM Norte (Y):", format="%.2f", step=100.0, key="in_utm_y", on_change=al_cambiar_utm)
+        st.number_input("Huso:", min_value=28, max_value=31, step=1, key="in_utm_h", on_change=al_cambiar_utm)
         
         st.divider()
-        capa_elegida = st.radio("Capa Base IGN:", ["Satélite PNOA", "Topográfico MTN"], key="capa_base_selector")
-        
-        if capa_elegida != st.session_state['old_capa']:
-            st.session_state['old_capa'] = capa_elegida
-            st.session_state['rebuild_map'] = True
-            st.rerun()
+        st.radio("Capa Base IGN:", ["Satélite PNOA", "Topográfico MTN"], key="capa_base_selector", on_change=al_cambiar_capa)
 
         st.divider()
         st.toggle(
@@ -452,11 +467,7 @@ with tab1:
         )
 
         st.divider()
-        if st.button("🗑️ Borrar Polígono", use_container_width=True,type="primary"):
-            if 'poligono_usuario' in st.session_state:
-                del st.session_state['poligono_usuario']
-            st.session_state['rebuild_map'] = True
-            st.rerun()
+        st.button("🗑️ Borrar Polígono", use_container_width=True, type="primary", on_click=borrar_poligono)
 
 # ------------------------------------------
 # PESTAÑA 2
